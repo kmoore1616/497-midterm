@@ -3,9 +3,9 @@
 #include <BLEServer.h>
 #include <BLE2902.h>
 #include "ICM_20948.h" // Click here to get the library: http://librarymanager/All#SparkFun_ICM_20948_IMU
-//#include <WiFi.h>
-//#include <ArduinoOTA.h>
-#include <LiquidCrystal.h>
+#include <WiFi.h>
+#include <ArduinoOTA.h>
+//#include <LiquidCrystal.h>
 
 
 #define WIRE_PORT Wire // Your desired Wire port.      Used when "USE_SPI" is not defined
@@ -130,7 +130,6 @@ void loopBLE() {
 }
 
 // ============================================ OTA =================================================
-/*
 void setupOTA(){
   // OTA Setup
   ArduinoOTA.setHostname(ESP32_OTA_HOSTNAME);
@@ -153,7 +152,6 @@ void setupOTA(){
 
   Serial.println("Ready for OTA");
 }
-*/
 
 // ============================================ IMU ===========================
 
@@ -396,7 +394,7 @@ void end_step() {
 
  http://www.arduino.cc/en/Tutorial/LiquidCrystalHelloWorld
 
-*/
+
 
 // include the library code:
 
@@ -440,16 +438,16 @@ void loopLCD() {
   }
 }
 
-
+*/
 
 
 void setup() {
   SERIAL_PORT.begin(115200);
   while(!SERIAL_PORT);
 
-//  WiFi.mode(WIFI_STA);
- // WiFi.begin(ssid, password);
-/*
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
   while (WiFi.waitForConnectResult() != WL_CONNECTED) {
     Serial.println("Connection Failed! Rebooting...");
     delay(5000);
@@ -459,18 +457,18 @@ void setup() {
   Serial.println("Connected to WiFi");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-*/
-  //setupOTA();
+
+  setupOTA();
   setupBLE();
   setupICM20948();
-  setupLCD();
+//  setupLCD();
 }
 
 void loop() {
 //  loopCounter(); // Steps emulation
   loopBLE();
   loopICM20948();
-  loopLCD();
+//  loopLCD();
 
   
   long after = micros();
