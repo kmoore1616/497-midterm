@@ -7,6 +7,9 @@
 #include <ArduinoOTA.h>
 //#include <LiquidCrystal.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
 
 #define WIRE_PORT Wire // Your desired Wire port.      Used when "USE_SPI" is not defined
 #define SERIAL_PORT Serial
@@ -109,24 +112,32 @@ void setupBLE() {
 //}
 
 
-void loopBLE() {
-  if (!stepCharacteristic) {
-    return; // Ar
+void loopBLE(void *pvParameters) {
+
+  // char buffer[100];
+
+  while(1) {
+    if (!stepCharacteristic) {
+      return; // Ar
+    }
+
+    //wait
+    vTaskDelay(blePublishIntervalMs);
+    // if (millis() - lastBlePublishMs < blePublishIntervalMs) {
+    //   return;
+    // }
+
+    
+    lastBlePublishMs = millis();
+
+    stepCharacteristic->setValue((uint8_t *)&steps_taken, sizeof(steps_taken));
+
+    if (bleClientConnected && steps_taken != lastNotifiedSteps) {
+      stepCharacteristic->notify();
+      lastNotifiedSteps = steps_taken;
+    }
   }
 
-  if (millis() - lastBlePublishMs < blePublishIntervalMs) {
-    return;
-  }
-
-  
-  lastBlePublishMs = millis();
-
-  stepCharacteristic->setValue((uint8_t *)&steps_taken, sizeof(steps_taken));
-
-  if (bleClientConnected && steps_taken != lastNotifiedSteps) {
-    stepCharacteristic->notify();
-    lastNotifiedSteps = steps_taken;
-  }
 }
 
 // ============================================ OTA =================================================
@@ -172,7 +183,7 @@ void setupICM20948() {
     if (myICM.status != ICM_20948_Stat_Ok)
     {
       SERIAL_PORT.println("Trying again...");
-      delay(500);
+      vTaskDelay((500 / portTICK_PERIOD_MS);
     }
     else
     {
@@ -185,7 +196,7 @@ void setupICM20948() {
       SERIAL_PORT.print(F("Software Reset returned: "));
       SERIAL_PORT.println(myICM.statusString());
     }
-    delay(250);
+    vTaskDelay((250 / portTICK_PERIOD_MS);
   
     // Now wake the sensor up
     myICM.sleep(false);
@@ -224,44 +235,55 @@ void setupICM20948() {
   }
 }
 
-void loopICM20948() {
-  if (myICM.dataReady())
-  {
-    myICM.getAGMT();
+void loopICM20948(void *pvParameters) {
+  
+  char buffer[100];
 
-    float accX = myICM.accX();
-    float accY = myICM.accY();
-    float accZ = myICM.accZ();
-    // SERIAL_PORT.print(accX); SERIAL_PORT.print(", ");
-    // SERIAL_PORT.print(accY); SERIAL_PORT.print(", ");
-    // SERIAL_PORT.print(accZ);
-    float acc_sum = pythagorean(accX,accY,accZ);
-    doStepCounting(acc_sum);
-    Serial.println();
-    delay(8);
-   
-  }
-  else
-  {
-    SERIAL_PORT.println("Waiting for data");
-    delay(500);
-  }
+  while (1) {
+    if (myICM.dataReady())
+    {
+      char* empty = "";
+      strcpy(buffer, empty);
+      myICM.getAGMT();
 
-  float temp = myICM.temp();
-  // Serial.print("temp = ");
-  // Serial.println(temp);
+      float accX = myICM.accX();
+      float accY = myICM.accY();
+      float accZ = myICM.accZ();
+      // SERIAL_PORT.print(accX); SERIAL_PORT.print(", ");
+      // SERIAL_PORT.print(accY); SERIAL_PORT.print(", ");
+      // SERIAL_PORT.print(accZ);
+      float acc_sum = pythagorean(accX,accY,accZ);
+      doStepCounting(acc_sum, buffer);
+      appendInBuffer(buffer, "\n");
+      vTaskDelay((8 / portTICK_PERIOD_MS);
+    }
+    else
+    {
+      SERIAL_PORT.println("Waiting for data");
+      vTaskDelay((500 / portTICK_PERIOD_MS);
+    }
+
+    float temp = myICM.temp();
+  }
 }
-
-////////////////////////////////////////////////////////////////////////
-// Step Counting
-////////////////////////////////////////////////////////////////////////
-
 
 float pythagorean(float x, float y, float z) {
   return sqrt(x * x + y * y + z * z);
 }
 
-void doStepCounting(float acc) {
+void appendInBuffer(char buffer[], char* addition) {
+  int start = sizeof(buffer)/sizeof(char);
+  int additionLength = sizeof(addition)/sizeof(char);;
+  for (int i = 0; i < additionLength; i++) {
+    buffer[start + i] = addition[i];
+  }
+  buffer[start + additionLength] = '\0';
+}
+
+// ============================================ Step Counting (extension of IMU task) ===========================
+
+
+void doStepCounting(float acc, char buffer[]) {
   // Serial.print(acc);
   // Serial.print(", ");
 
@@ -275,8 +297,9 @@ void doStepCounting(float acc) {
   }
   float before = ema;
   applyToEMA(acc);
-  Serial.print(ema);
-  Serial.print(", ");
+  char* thing = "";
+  sprintf(thing, "%f, ", ema);
+  appendInBuffer(buffer, thing);
 
   // digitalWrite(LED_pin, ema > before ? HIGH : LOW);
 
@@ -287,7 +310,7 @@ void doStepCounting(float acc) {
     return;
   }
   //in the swing of things
-  checkStep(x);
+  checkStep(x, buffer);
 }
 
 void applyToEMA(float acc) {
@@ -312,15 +335,13 @@ void init_step(float x) {
   }
 }
 
-
-//
 // if the ema has moved by a certain amount away from its peak, then same for the negative direction, that's counted as a step
-//
-void checkStep(float x) {
-  Serial.print(step_min);
-  Serial.print(", ");
-  Serial.print(step_max);
-  Serial.print(", ");
+void checkStep(float x, char buffer[]) {
+  char* thing = "";
+  sprintf(thing, "%d, ", step_min);
+  appendInBuffer(buffer, thing);
+  sprintf(thing, "%d, ", step_max);
+  appendInBuffer(buffer, thing);
   if (x > step_max) {
     step_max = x;
     step_min = step_max - step_threshold;
@@ -350,9 +371,7 @@ void end_step() {
 }
 
 
-////////////////////////////////////////////////////////////////////////
-// LCD
-////////////////////////////////////////////////////////////////////////
+// ============================================ LCD ===========================
 
 /*
   LiquidCrystal Library - Hello World
@@ -440,6 +459,33 @@ void loopLCD() {
 
 */
 
+// ============================================ Printer ===========================
+
+QueueHandle_t msgQueue;
+
+struct Message {
+  char buffer[100];
+};
+
+
+// uses print, not println
+void printFromQueue(void *pvParameters) {
+
+  while(1) {
+    struct Message myMessage;
+    if (xQueueReceive(msgQueue, &myMessage, portMAX_DELAY) == pdPASS) {
+      Serial.print(myMessage.buffer);
+    }
+    vTaskDelay(100);
+  }
+}
+
+void setupMsgQueue() {
+  msgQueue = xQueueCreate(10, sizeof(struct Message));
+}
+
+// ============================================ General ===========================
+
 
 void setup() {
   SERIAL_PORT.begin(115200);
@@ -462,14 +508,42 @@ void setup() {
   setupBLE();
   setupICM20948();
 //  setupLCD();
+  setupMsgQueue();
+
+  xTaskCreate(
+  loopBLE
+  ,  "loopBLE"  // A name just for humans
+  ,  1028  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
+  xTaskCreate(
+  loopICM20948
+  ,  "loopICM20948"  // A name just for humans
+  ,  1028  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
+  // xTaskCreate(
+  // loopLCD
+  // ,  "loopLCD"  // A name just for humans
+  // ,  1028  // stack size
+  // ,  NULL
+  // ,  2  // Priority
+  // ,  NULL ); 
+  xTaskCreate(
+  printFromQueue
+  ,  "printFromQueue"  // A name just for humans
+  ,  1028  // stack size
+  ,  NULL
+  ,  3  // Priority
+  ,  NULL ); 
+  
+
 }
 
 void loop() {
-//  loopCounter(); // Steps emulation
-  loopBLE();
-  loopICM20948();
-//  loopLCD();
 
   
-  long after = micros();
+  // long after = micros();
 }
