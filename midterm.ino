@@ -1,3 +1,6 @@
+#define MAIN_PROGRAM
+#ifdef MAIN_PROGRAM
+
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -20,6 +23,8 @@ static const char *ACTIVITY_SERVICE_UUID = "6cfb5360-8c88-4f50-9f24-6ed6bd8d3f8f
 static const char *STEP_COUNT_CHAR_UUID = "0b8dd7d2-e8ad-4a32-8f56-f191d0fc3c42";
 static const char *TEMP_CHAR_UUID = "0b9ee8e3-f9be-5b43-9067-02a2e10d4d53";
 
+//const char* ssid = "Pixel#";
+//const char* password = "crazy1234";
 
 const char* ssid = "TP-Link_BDF3";
 const char* password = "57394206";
@@ -248,6 +253,8 @@ void loopICM20948() {
     float accX = myICM.accX();
     float accY = myICM.accY();
     float accZ = myICM.accZ();
+    temperature = myICM.temp();
+
     // SERIAL_PORT.print(accX); SERIAL_PORT.print(", ");
     // SERIAL_PORT.print(accY); SERIAL_PORT.print(", ");
     // SERIAL_PORT.print(accZ);
@@ -485,8 +492,11 @@ void loop() {
   ArduinoOTA.handle();
   loopBLE();
   loopICM20948();
+  
   loopLCD();
 
   
   long after = micros();
 }
+
+#endif
