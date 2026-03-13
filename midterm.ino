@@ -1,3 +1,6 @@
+#define MAIN_PROGRAM
+#ifdef MAIN_PROGRAM
+
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -5,7 +8,7 @@
 #include "ICM_20948.h" // Click here to get the library: http://librarymanager/All#SparkFun_ICM_20948_IMU
 #include <WiFi.h>
 #include <ArduinoOTA.h>
-//#include <LiquidCrystal.h>
+#include <LiquidCrystal.h>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -22,12 +25,16 @@ ICM_20948_I2C myICM; // Otherwise create an ICM_20948_I2C object
 // BLE custom service/characteristic UUIDs
 static const char *ACTIVITY_SERVICE_UUID = "6cfb5360-8c88-4f50-9f24-6ed6bd8d3f8f";
 static const char *STEP_COUNT_CHAR_UUID = "0b8dd7d2-e8ad-4a32-8f56-f191d0fc3c42";
+static const char *TEMP_CHAR_UUID = "0b9ee8e3-f9be-5b43-9067-02a2e10d4d53";
 
+//const char* ssid = "Pixel#";
+//const char* password = "crazy1234";
 
 const char* ssid = "TP-Link_BDF3";
 const char* password = "57394206";
 
 BLECharacteristic *stepCharacteristic;
+BLECharacteristic *tempCharacteristic;
 bool bleClientConnected = false;
 
 
@@ -51,6 +58,8 @@ const unsigned long blePublishIntervalMs = 200; // update BLE value 5 Hz
 bool counter_initializing = true;
 bool going_up = false;
 int steps_taken = 0;
+
+int temperature = 0;
 
 float ema = 0;
 // float long_ema = 0;
@@ -87,7 +96,18 @@ void setupBLE() {
   );
   stepCharacteristic->addDescriptor(new BLE2902());
 
+   tempCharacteristic = activityService->createCharacteristic(
+    TEMP_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  tempCharacteristic->addDescriptor(new BLE2902());
+
+  
+  tempCharacteristic->setValue((uint8_t *)&temperature, sizeof(temperature));
   stepCharacteristic->setValue((uint8_t *)&steps_taken, sizeof(steps_taken));
+
+
+
   activityService->start();
 
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
@@ -131,6 +151,7 @@ void loopBLE(void *pvParameters) {
     lastBlePublishMs = millis();
 
     stepCharacteristic->setValue((uint8_t *)&steps_taken, sizeof(steps_taken));
+    tempCharacteristic->setValue((uint8_t *)&temperature, sizeof(temperature));
 
     if (bleClientConnected && steps_taken != lastNotifiedSteps) {
       stepCharacteristic->notify();
