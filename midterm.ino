@@ -69,6 +69,20 @@ float step_max = 0;
 
 int iteration = 0;
 
+QueueHandle_t msgQueue;
+
+struct Message {
+  char buffer[100];
+};
+
+int interruptCounter = 0;
+
+#include "driver/rtc_io.h"
+
+#define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
+#define USE_EXT0_WAKEUP          1               // 1 = EXT0 wakeup, 0 = EXT1 wakeup
+#define WAKEUP_GPIO              GPIO_NUM_32     // Only RTC IO are allowed - ESP32 Pin example
+RTC_DATA_ATTR int bootCount = 0;
 
 // ================================= BLUETOOTH ==================================================
 
@@ -134,6 +148,7 @@ void setupBLE() {
 
 void loopBLE(void *pvParameters) {
 
+  Serial.println("loopBLE begun");
   // char buffer[100];
 
   while(1) {
@@ -185,6 +200,133 @@ void setupOTA(){
   Serial.println("Ready for OTA");
 }
 
+// ============================================ Heart Rate ===========================
+
+//Example5_HeartRate.ino from SparkFun Max3010X
+
+
+#include <Wire.h>
+#include "MAX30105.h"
+
+#include "heartRate.h"
+
+#define BPM_LED_Pin 16
+
+MAX30105 particleSensor;
+
+const byte RATE_SIZE = 20; //Increase this for more averaging. 4 is good.
+byte rates[RATE_SIZE]; //Array of heart rates
+byte rateSpot = 0;
+bool fullLoop = false;
+long lastBeat = 0; //Time at which the last beat occurred
+
+float beatsPerMinute;
+int beatAvg;
+
+bool flagHighPrecision = false;
+
+void setupHeartRate()
+{
+  Serial.begin(115200);
+  Serial.println("Initializing...");
+
+  pinMode(BPM_LED_Pin, OUTPUT);
+  digitalWrite(BPM_LED_Pin, LOW);
+
+  // Initialize sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) //Use default I2C port, 400kHz speed
+  {
+    Serial.println("MAX30105 was not found. Please check wiring/power. ");
+    while (1);
+  }
+  Serial.println("Place your index finger on the sensor with steady pressure.");
+
+  particleSensor.setup(); //Configure sensor with default settings
+  particleSensor.setPulseAmplitudeRed(0x0A); //Turn Red LED to low to indicate sensor is running
+  particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
+}
+
+void loopHeartRate(void *pvParameters) {
+
+  Serial.println("loopHeartRate begun");
+  
+  struct Message msg;
+
+  while(1) {
+
+    long irValue = particleSensor.getIR();
+    bool beatDetected = checkForBeat(irValue);
+
+    if (beatDetected)
+    {
+      //We sensed a beat!
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+
+      beatsPerMinute = 60 / (delta / 1000.0);
+
+      if (beatsPerMinute < 255 && beatsPerMinute > 20)
+      {
+        rates[rateSpot++] = (byte)beatsPerMinute; //Store this reading in the array
+        rateSpot %= RATE_SIZE; //Wrap variable
+        if (!fullLoop && rateSpot == 0) {
+          fullLoop = true;
+        }
+        //Take average of readings
+        beatAvg = 0;
+        byte max = fullLoop ? RATE_SIZE : rateSpot;
+        for (byte x = 0 ; x < max; x++)
+          beatAvg += rates[x];
+        beatAvg /= max;
+      }
+      else {
+
+      }
+    }
+    if (!beatDetected) {
+      if (!flagHighPrecision) {
+        vTaskDelay(15 / portTICK_PERIOD_MS);
+      }
+      else {
+        //1200 samples instead of 400
+        vTaskDelay(5 / portTICK_PERIOD_MS);
+      }
+      continue;
+    }
+    
+    char* empty = "";
+    strcpy(msg.buffer, empty);
+
+    char thing[100] = "";
+    sprintf(thing, "IR=%ld, BPM=%f, Avg BPM = %d", irValue, beatsPerMinute, beatAvg);
+    appendInBuffer(msg.buffer, thing);
+    if (!fullLoop)
+      appendInBuffer(msg.buffer, " (not yet max samples)");
+    if (flagHighPrecision) {
+      appendInBuffer(msg.buffer, " (precision)");
+    }
+
+
+    // Serial.print("IR=");
+    // Serial.print(irValue);
+    // Serial.print(", BPM=");
+    // Serial.print(beatsPerMinute);
+    // Serial.print(", Avg BPM=");
+    // Serial.print(beatAvg);
+
+    if (irValue < 50000)
+      appendInBuffer(msg.buffer, " No finger?");
+    
+    xQueueSend(msgQueue, &msg, portMAX_DELAY);
+    // Serial.println("heart rate msg sent");
+    
+    //400 samples / 60 sec
+    vTaskDelay(15 / portTICK_PERIOD_MS);
+  }
+}
+
+
+
 // ============================================ IMU ===========================
 
 void setupICM20948() {
@@ -204,7 +346,7 @@ void setupICM20948() {
     if (myICM.status != ICM_20948_Stat_Ok)
     {
       SERIAL_PORT.println("Trying again...");
-      vTaskDelay((500 / portTICK_PERIOD_MS);
+      vTaskDelay(500 / portTICK_PERIOD_MS);
     }
     else
     {
@@ -217,7 +359,7 @@ void setupICM20948() {
       SERIAL_PORT.print(F("Software Reset returned: "));
       SERIAL_PORT.println(myICM.statusString());
     }
-    vTaskDelay((250 / portTICK_PERIOD_MS);
+    vTaskDelay(250 / portTICK_PERIOD_MS);
   
     // Now wake the sensor up
     myICM.sleep(false);
@@ -258,13 +400,15 @@ void setupICM20948() {
 
 void loopICM20948(void *pvParameters) {
   
-  char buffer[100];
+  Serial.println("loopICM20948 begun");
+  
+  struct Message msg;
 
   while (1) {
     if (myICM.dataReady())
     {
       char* empty = "";
-      strcpy(buffer, empty);
+      strcpy(msg.buffer, empty);
       myICM.getAGMT();
 
       float accX = myICM.accX();
@@ -274,14 +418,18 @@ void loopICM20948(void *pvParameters) {
       // SERIAL_PORT.print(accY); SERIAL_PORT.print(", ");
       // SERIAL_PORT.print(accZ);
       float acc_sum = pythagorean(accX,accY,accZ);
-      doStepCounting(acc_sum, buffer);
-      appendInBuffer(buffer, "\n");
-      vTaskDelay((8 / portTICK_PERIOD_MS);
+      doStepCounting(acc_sum, msg.buffer);
+      // Serial.print("msg.buffer:");
+      // Serial.println(msg.buffer);
+      xQueueSend(msgQueue, &msg, portMAX_DELAY);
+      // Serial.println("ICM message sent");
+
+      vTaskDelay(8 / portTICK_PERIOD_MS);
     }
     else
     {
       SERIAL_PORT.println("Waiting for data");
-      vTaskDelay((500 / portTICK_PERIOD_MS);
+      vTaskDelay(500 / portTICK_PERIOD_MS);
     }
 
     float temp = myICM.temp();
@@ -293,12 +441,15 @@ float pythagorean(float x, float y, float z) {
 }
 
 void appendInBuffer(char buffer[], char* addition) {
-  int start = sizeof(buffer)/sizeof(char);
-  int additionLength = sizeof(addition)/sizeof(char);;
+  // Serial.printf("before: buffer=\"%s\", addition=\"%s\"\n", buffer, addition);
+  int start = strlen(buffer);//sizeof(buffer)/sizeof(char);
+  int additionLength = strlen(addition);//sizeof(addition)/sizeof(char);
   for (int i = 0; i < additionLength; i++) {
     buffer[start + i] = addition[i];
   }
   buffer[start + additionLength] = '\0';
+  // Serial.printf("start=%d, addition=%d, end = %d\n", start, additionLength, start + additionLength);
+  // Serial.printf("after: buffer=\"%s\", addition=\"%s\"\n", buffer, addition);
 }
 
 // ============================================ Step Counting (extension of IMU task) ===========================
@@ -316,9 +467,10 @@ void doStepCounting(float acc, char buffer[]) {
     // long_ema = acc;
     return;
   }
+
   float before = ema;
   applyToEMA(acc);
-  char* thing = "";
+  char thing[100] = "";
   sprintf(thing, "%f, ", ema);
   appendInBuffer(buffer, thing);
 
@@ -482,21 +634,27 @@ void loopLCD() {
 
 // ============================================ Printer ===========================
 
-QueueHandle_t msgQueue;
 
-struct Message {
-  char buffer[100];
-};
+//Must go at top of file?
+// QueueHandle_t msgQueue;
+
+// struct Message {
+//   char buffer[100];
+// };
 
 
 // uses print, not println
 void printFromQueue(void *pvParameters) {
 
+  Serial.println("printFromQueue begun");
+
   while(1) {
     struct Message myMessage;
-    if (xQueueReceive(msgQueue, &myMessage, portMAX_DELAY) == pdPASS) {
-      Serial.print(myMessage.buffer);
+    while (xQueueReceive(msgQueue, &myMessage, portMAX_DELAY) == pdPASS) {
+      // Serial.print("msg received! ->");
+      Serial.println(myMessage.buffer);
     }
+
     vTaskDelay(100);
   }
 }
@@ -505,13 +663,73 @@ void setupMsgQueue() {
   msgQueue = xQueueCreate(10, sizeof(struct Message));
 }
 
+// ============================================ Button Interrupt ===========================
+
+//
+
+
+#define BUTTON_INTERRUPT_PIN 32
+
+void setupButton() {
+  pinMode(BUTTON_INTERRUPT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_INTERRUPT_PIN), buttonInterrupt, FALLING);
+  
+  ++bootCount;
+  Serial.println("Boot count: " + String(bootCount));
+  digitalWrite(BPM_LED_Pin, HIGH);
+  delay(100);
+  digitalWrite(BPM_LED_Pin, LOW);
+  delay(100);
+  // testButton();
+}
+
+// void testButton() {
+//   while (1) {
+//     Serial.println(digitalRead(BUTTON_INTERRUPT_PIN));
+//     delay(100);
+//   }
+// }
+
+bool flagSleep = false;
+int cooldown = 0;
+void buttonInterrupt() {
+  flagSleep = true;
+  // if (cooldown > 0) return;
+  // flagHighPrecision = !flagHighPrecision;
+  // interruptCounter++;
+  // cooldown = 500;
+}
+
+void loopButton(void *pvParameters) {
+  // float delayAmount = 100;
+  // while(1) {
+  //   digitalWrite(BPM_LED_Pin, flagHighPrecision);
+  //   // Serial.printf("interrupt count: %d, flagHighPrecision:%s\n", interruptCounter, flagHighPrecision ? "true" : "false");
+  //   if (cooldown > 0) {
+  //     cooldown -= delayAmount;
+  //   }
+  //   vTaskDelay(delayAmount);
+  // }
+
+  while (1) {
+    if (flagSleep) {
+      goToSleep();
+    }
+    vTaskDelay(100);
+  }
+}
+
+void goToSleep() {
+  esp_sleep_enable_ext0_wakeup(WAKEUP_GPIO, LOW); //same as BUTTON_INTERRUPT_PIN
+  pinMode(WAKEUP_GPIO, PULLUP);
+  Serial.println("sleeping now...");
+  delay(500);
+  esp_deep_sleep_start();
+}
+
 // ============================================ General ===========================
 
-
-void setup() {
-  SERIAL_PORT.begin(115200);
-  while(!SERIAL_PORT);
-
+void setupWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
@@ -525,11 +743,54 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  setupOTA();
+}
+
+void setup() {
+  SERIAL_PORT.begin(115200);
+  while(!SERIAL_PORT);
+
+  // setupWiFi();
+  Serial.println("a");
+  delay(200);
+
+  // setupOTA();
+  Serial.println("b");
+  delay(200);
+
   setupBLE();
-  setupICM20948();
-//  setupLCD();
+  Serial.println("c");
+  delay(200);
+
   setupMsgQueue();
+  Serial.println("d");
+  delay(200);
+
+  setupICM20948();
+  Serial.println("e");
+  delay(200);
+
+  setupHeartRate();
+  Serial.println("e");
+  delay(200);
+
+//  setupLCD();
+  Serial.println("f");
+  delay(200);
+
+  setupButton();
+  Serial.println("a");
+  delay(200);
+
+
+  xTaskCreate(
+  printFromQueue
+  ,  "printFromQueue"  // A name just for humans
+  ,  1028  // stack size
+  ,  NULL
+  ,  3  // Priority
+  ,  NULL ); 
+  Serial.println("h");
+  delay(200);
 
   xTaskCreate(
   loopBLE
@@ -538,13 +799,39 @@ void setup() {
   ,  NULL
   ,  2  // Priority
   ,  NULL ); 
+  Serial.println("g");
+  delay(200);
+
+  // xTaskCreate(
+  // loopICM20948
+  // ,  "loopICM20948"  // A name just for humans
+  // ,  4096  // stack size
+  // ,  NULL
+  // ,  2  // Priority
+  // ,  NULL ); 
+  // Serial.println("h");
+  // delay(5000);
+
   xTaskCreate(
-  loopICM20948
-  ,  "loopICM20948"  // A name just for humans
-  ,  1028  // stack size
+  loopHeartRate
+  ,  "loopHeartRate"  // A name just for humans
+  ,  4096  // stack size
   ,  NULL
   ,  2  // Priority
   ,  NULL ); 
+  Serial.println("h");
+  delay(200);
+
+  // xTaskCreate(
+  // loopICM20948
+  // ,  "loopICM20948"  // A name just for humans
+  // ,  1028  // stack size
+  // ,  NULL
+  // ,  2  // Priority
+  // ,  NULL ); 
+  // Serial.println("h");
+  // delay(200);
+  
   // xTaskCreate(
   // loopLCD
   // ,  "loopLCD"  // A name just for humans
@@ -552,15 +839,22 @@ void setup() {
   // ,  NULL
   // ,  2  // Priority
   // ,  NULL ); 
-  xTaskCreate(
-  printFromQueue
-  ,  "printFromQueue"  // A name just for humans
-  ,  1028  // stack size
-  ,  NULL
-  ,  3  // Priority
-  ,  NULL ); 
-  
+  // Serial.println("i");
+  // delay(200);
 
+  xTaskCreate(
+  loopButton
+  ,  "loopButton"  // A name just for humans
+  ,  2048  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
+  Serial.println("h");
+  delay(200);
+
+
+  Serial.println("setup complete");
+  delay(200);
 }
 
 void loop() {
@@ -568,3 +862,5 @@ void loop() {
   
   // long after = micros();
 }
+
+#endif
