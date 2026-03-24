@@ -1,11 +1,11 @@
+
 #define MAIN_PROGRAM
-#ifdef MAIN_PROGRAM
 
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
 #include <BLE2902.h>
-#include "ICM_20948.h" // Click here to get the library: http://librarymanager/All#SparkFun_ICM_20948_IMU
+// #include "ICM_20948.h" // Disabled while running without the accelerometer
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <LiquidCrystal.h>
@@ -14,24 +14,20 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 
-#define WIRE_PORT Wire // Your desired Wire port.      Used when "USE_SPI" is not defined
 #define SERIAL_PORT Serial
 
-#define AD0_VAL 1
 #define ESP32_OTA_HOSTNAME "esp32-smart-watch"
-
-ICM_20948_I2C myICM; // Otherwise create an ICM_20948_I2C object
 
 // BLE custom service/characteristic UUIDs
 static const char *ACTIVITY_SERVICE_UUID = "6cfb5360-8c88-4f50-9f24-6ed6bd8d3f8f";
 static const char *STEP_COUNT_CHAR_UUID = "0b8dd7d2-e8ad-4a32-8f56-f191d0fc3c42";
 static const char *TEMP_CHAR_UUID = "0b9ee8e3-f9be-5b43-9067-02a2e10d4d53";
 
-//const char* ssid = "Pixel#";
-//const char* password = "crazy1234";
+const char* ssid = "Pixel#";
+const char* password = "crazy1234";
 
-const char* ssid = "TP-Link_BDF3";
-const char* password = "57394206";
+//const char* ssid = "TP-Link_BDF3";
+//const char* password = "57394206";
 
 BLECharacteristic *stepCharacteristic;
 BLECharacteristic *tempCharacteristic;
@@ -49,6 +45,7 @@ const unsigned long blePublishIntervalMs = 200; // update BLE value 5 Hz
 // Step counting vars
 
 #define LED_pin 23
+#define BATTERY_ADC_PIN 35
 
 #define alpha 0.1f
 // #define long_alpha 0.001f
@@ -68,6 +65,30 @@ float step_min = 0;
 float step_max = 0;
 
 int iteration = 0;
+
+float readBattery(void) {
+  const float r1 = 10000.0f;
+  const float r2 = 5100.0f;
+  const float batteryMinVoltage = 6.0f;
+  const float batteryMaxVoltage = 8.4f;
+  const float adcReferenceVoltage = 3.3f;
+  const int adcMaxReading = 4095;
+
+  int raw = analogRead(BATTERY_ADC_PIN);
+  float dividerVoltage = ((float)raw / adcMaxReading) * adcReferenceVoltage;
+  float batteryVoltage = dividerVoltage * ((r1 + r2) / r2);
+  float fraction = (batteryVoltage - batteryMinVoltage) / (batteryMaxVoltage - batteryMinVoltage);
+
+  if (fraction < 0.0f) {
+    return 0.0f;
+  }
+
+  if (fraction > 1.0f) {
+    return 1.0f;
+  }
+
+  return fraction;
+}
 
 
 // ================================= BLUETOOTH ==================================================
@@ -185,8 +206,16 @@ void setupOTA(){
   Serial.println("Ready for OTA");
 }
 
+void loopOTA(void *pvParameters) {
+  while (1) {
+    ArduinoOTA.handle();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
 // ============================================ IMU ===========================
 
+#if 0
 void setupICM20948() {
   WIRE_PORT.begin();
   WIRE_PORT.setClock(400000);
@@ -390,95 +419,74 @@ void end_step() {
   digitalWrite(LED_pin, LOW);
   going_up = true;
 }
+#endif
+
+const unsigned long simulatedStepIntervalMs = 1000;
+
+void setupICM20948() {
+  SERIAL_PORT.println("ICM-20948 disabled; using simulated step counter");
+}
+
+void loopICM20948(void *pvParameters) {
+  while (1) {
+    float batteryFraction = readBattery();
+
+    steps_taken++;
+    temperature = 72 + (steps_taken % 5);
+
+    digitalWrite(LED_pin, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    digitalWrite(LED_pin, LOW);
+
+    SERIAL_PORT.print("Simulated steps: ");
+    SERIAL_PORT.print(steps_taken);
+    SERIAL_PORT.print(" | battery: ");
+    SERIAL_PORT.println(batteryFraction, 3);
+
+    vTaskDelay(pdMS_TO_TICKS(simulatedStepIntervalMs));
+  }
+}
 
 
 // ============================================ LCD ===========================
 
-/*
-  LiquidCrystal Library - Hello World
-
- Demonstrates the use a 16x2 LCD display.  The LiquidCrystal
- library works with all LCD displays that are compatible with the
- Hitachi HD44780 driver. There are many of them out there, and you
- can usually tell them by the 16-pin interface.
-
- This sketch prints "Hello World!" to the LCD
- and shows the time.
-
-  The circuit:
- * LCD RS pin to digital pin 12
- * LCD Enable pin to digital pin 11
- * LCD D4 pin to digital pin 5
- * LCD D5 pin to digital pin 4
- * LCD D6 pin to digital pin 3
- * LCD D7 pin to digital pin 2
- * LCD R/W pin to ground
- * LCD VSS pin to ground
- * LCD VCC pin to 5V
- * 10K resistor:
- * ends to +5V and ground
- * wiper to LCD VO pin (pin 3)
-
- Library originally added 18 Apr 2008
- by David A. Mellis
- library modified 5 Jul 2009
- by Limor Fried (http://www.ladyada.net)
- example added 9 Jul 2009
- by Tom Igoe
- modified 22 Nov 2010
- by Tom Igoe
- modified 7 Nov 2016
- by Arturo Guadalupi
-
- This example code is in the public domain.
-
- http://www.arduino.cc/en/Tutorial/LiquidCrystalHelloWorld
-
-
-
-// include the library code:
-
-
-// #define LED2_pin 12
-// initialize the library by associating any needed LCD interface pin
-// with the arduino pin number it is connected to
+// SPLC780D character LCDs are command-compatible with HD44780 displays,
+// so the standard LiquidCrystal 4-bit interface works with the same pinout.
 const int rs = 19, en = 18, d4 = 27, d5 = 26, d6 = 25, d7 = 33;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 
 unsigned long last_lcd_print = 0;
 void setupLCD() {
-  // set up the LCD's number of columns and rows:
-  // pinMode(LED2_pin, OUTPUT);
-  // digitalWrite(LED2_pin, LOW);
+  delay(50);
   lcd.begin(16, 2);
-  // Print a message to the LCD.
-  lcd.print("hello, world!");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("SPLC780D LCD");
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
   delay(1000);
   lcd.clear();
-  delay(1000);
   last_lcd_print = millis();
 }
 
-char buff[16];
+char buff[17];
 
 #define millis_per_print 500
-void loopLCD() {
-  if (millis() > last_lcd_print + millis_per_print) {
-    // Serial.println("aaaaa");
-    last_lcd_print = millis();
-    // set the cursor to column 0, line 1
-    // (note: line 1 is the second row, since counting begins with 0):
-    lcd.clear();
-    // delay(500);
-    lcd.setCursor(0, 1);
-    // print the number of seconds since reset:
-    sprintf(buff, "%d steps", steps_taken);
-    lcd.print(buff);
-    // lcd.print("testtesttest");
+void loopLCD(void *pvParameters) {
+  while (1) {
+    if (millis() > last_lcd_print + millis_per_print) {
+      last_lcd_print = millis();
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Steps:");
+      lcd.setCursor(0, 1);
+      snprintf(buff, sizeof(buff), "%d", steps_taken);
+      lcd.print(buff);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
-
-*/
 
 // ============================================ Printer ===========================
 
@@ -528,36 +536,43 @@ void setup() {
   setupOTA();
   setupBLE();
   setupICM20948();
-//  setupLCD();
+  setupLCD();
   setupMsgQueue();
 
   xTaskCreate(
   loopBLE
   ,  "loopBLE"  // A name just for humans
-  ,  1028  // stack size
+  ,  4096  // stack size
   ,  NULL
   ,  2  // Priority
   ,  NULL ); 
   xTaskCreate(
   loopICM20948
   ,  "loopICM20948"  // A name just for humans
-  ,  1028  // stack size
+  ,  4096  // stack size
   ,  NULL
   ,  2  // Priority
   ,  NULL ); 
-  // xTaskCreate(
-  // loopLCD
-  // ,  "loopLCD"  // A name just for humans
-  // ,  1028  // stack size
-  // ,  NULL
-  // ,  2  // Priority
-  // ,  NULL ); 
+  xTaskCreate(
+  loopLCD
+  ,  "loopLCD"  // A name just for humans
+  ,  4096  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
   xTaskCreate(
   printFromQueue
   ,  "printFromQueue"  // A name just for humans
-  ,  1028  // stack size
+  ,  4096  // stack size
   ,  NULL
   ,  3  // Priority
+  ,  NULL ); 
+  xTaskCreate(
+  loopOTA
+  ,  "loopOTA"  // A name just for humans
+  ,  4096  // stack size
+  ,  NULL
+  ,  2  // Priority
   ,  NULL ); 
   
 
