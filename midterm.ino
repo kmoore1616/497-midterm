@@ -1,5 +1,5 @@
+
 #define MAIN_PROGRAM
-#ifdef MAIN_PROGRAM
 
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -35,6 +35,8 @@ const char* password = "57394206";
 
 BLECharacteristic *stepCharacteristic;
 BLECharacteristic *tempCharacteristic;
+BLECharacteristic *heartBPMCharacteristic;
+BLECharacteristic *batteryCharacteristic;
 bool bleClientConnected = false;
 
 
@@ -49,11 +51,12 @@ const unsigned long blePublishIntervalMs = 200; // update BLE value 5 Hz
 // Step counting vars
 
 #define LED_pin 23
+#define BATTERY_ADC_PIN 35
 
 #define alpha 0.1f
 // #define long_alpha 0.001f
 
-#define step_threshold 500
+#define step_threshold 300
 
 bool counter_initializing = true;
 bool going_up = false;
@@ -84,6 +87,69 @@ int interruptCounter = 0;
 #define WAKEUP_GPIO              GPIO_NUM_32     // Only RTC IO are allowed - ESP32 Pin example
 RTC_DATA_ATTR int bootCount = 0;
 
+/*
+0 = step
+1 = heart
+2 = battery
+*/
+int maxDisplayMode = 2;
+int displayMode = 0;
+bool flagSleep = false;
+
+float batteryFraction = 1;
+int batteryPercentage = 100;
+
+int beatAvg;
+
+// ================================= BATTERY ==================================================
+
+const unsigned long simulatedStepIntervalMs = 1000;
+
+void loopBattery(void *pvParameters) {
+  while (1) {
+    batteryFraction = readBattery();
+    batteryPercentage = (int)(batteryFraction * 100);
+
+    // steps_taken++;
+    // temperature = 72 + (steps_taken % 5);
+
+    digitalWrite(LED_pin, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    digitalWrite(LED_pin, LOW);
+
+    // SERIAL_PORT.print("Simulated steps: ");
+    // SERIAL_PORT.print(steps_taken);
+    // SERIAL_PORT.print(" | battery: ");
+    // SERIAL_PORT.println(batteryFraction, 3);
+
+    vTaskDelay(pdMS_TO_TICKS(simulatedStepIntervalMs));
+  }
+}
+
+float readBattery(void) {
+  const float r1 = 10000.0f;
+  const float r2 = 5100.0f;
+  const float batteryMinVoltage = 6.0f;
+  const float batteryMaxVoltage = 8.4f;
+  const float adcReferenceVoltage = 3.3f;
+  const int adcMaxReading = 4095;
+
+  int raw = analogRead(BATTERY_ADC_PIN);
+  float dividerVoltage = ((float)raw / adcMaxReading) * adcReferenceVoltage;
+  float batteryVoltage = dividerVoltage * ((r1 + r2) / r2);
+  float fraction = (batteryVoltage - batteryMinVoltage) / (batteryMaxVoltage - batteryMinVoltage);
+
+  if (fraction < 0.0f) {
+    return 0.0f;
+  }
+
+  if (fraction > 1.0f) {
+    return 1.0f;
+  }
+
+  return fraction;
+}
+
 // ================================= BLUETOOTH ==================================================
 
 class ActivityServerCallbacks : public BLEServerCallbacks {
@@ -104,21 +170,37 @@ void setupBLE() {
   server->setCallbacks(new ActivityServerCallbacks());
 
   BLEService *activityService = server->createService(ACTIVITY_SERVICE_UUID);
+
+  //create characteristics
   stepCharacteristic = activityService->createCharacteristic(
     STEP_COUNT_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
   );
   stepCharacteristic->addDescriptor(new BLE2902());
 
-   tempCharacteristic = activityService->createCharacteristic(
+  tempCharacteristic = activityService->createCharacteristic(
     TEMP_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
   );
   tempCharacteristic->addDescriptor(new BLE2902());
 
-  
-  tempCharacteristic->setValue((uint8_t *)&temperature, sizeof(temperature));
+  heartBPMCharacteristic = activityService->createCharacteristic(
+    TEMP_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  heartBPMCharacteristic->addDescriptor(new BLE2902());
+
+  batteryCharacteristic = activityService->createCharacteristic(
+    TEMP_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  batteryCharacteristic->addDescriptor(new BLE2902());
+
+  //attach values
   stepCharacteristic->setValue((uint8_t *)&steps_taken, sizeof(steps_taken));
+  tempCharacteristic->setValue((uint8_t *)&temperature, sizeof(temperature));
+  heartBPMCharacteristic->setValue((uint8_t *)&beatAvg, sizeof(beatAvg));
+  batteryCharacteristic->setValue((uint8_t *)&batteryPercentage, sizeof(batteryPercentage));
 
 
 
@@ -167,6 +249,8 @@ void loopBLE(void *pvParameters) {
 
     stepCharacteristic->setValue((uint8_t *)&steps_taken, sizeof(steps_taken));
     tempCharacteristic->setValue((uint8_t *)&temperature, sizeof(temperature));
+    heartBPMCharacteristic->setValue((uint8_t *)&beatAvg, sizeof(beatAvg));
+    batteryCharacteristic->setValue((uint8_t *)&batteryPercentage, sizeof(batteryPercentage));
 
     if (bleClientConnected && steps_taken != lastNotifiedSteps) {
       stepCharacteristic->notify();
@@ -199,6 +283,12 @@ void setupOTA(){
 
   Serial.println("Ready for OTA");
 }
+void loopOTA(void *pvParameters) {
+  while (1) {
+    ArduinoOTA.handle();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
 
 // ============================================ Heart Rate ===========================
 
@@ -221,7 +311,6 @@ bool fullLoop = false;
 long lastBeat = 0; //Time at which the last beat occurred
 
 float beatsPerMinute;
-int beatAvg;
 
 bool flagHighPrecision = false;
 
@@ -329,6 +418,7 @@ void loopHeartRate(void *pvParameters) {
 
 // ============================================ IMU ===========================
 
+#if 1
 void setupICM20948() {
   WIRE_PORT.begin();
   WIRE_PORT.setClock(400000);
@@ -421,7 +511,8 @@ void loopICM20948(void *pvParameters) {
       doStepCounting(acc_sum, msg.buffer);
       // Serial.print("msg.buffer:");
       // Serial.println(msg.buffer);
-      xQueueSend(msgQueue, &msg, portMAX_DELAY);
+      if (displayMode == 0)
+        xQueueSend(msgQueue, &msg, portMAX_DELAY);
       // Serial.println("ICM message sent");
 
       vTaskDelay(8 / portTICK_PERIOD_MS);
@@ -432,7 +523,7 @@ void loopICM20948(void *pvParameters) {
       vTaskDelay(500 / portTICK_PERIOD_MS);
     }
 
-    float temp = myICM.temp();
+    temperature = myICM.temp();
   }
 }
 
@@ -510,7 +601,7 @@ void init_step(float x) {
 
 // if the ema has moved by a certain amount away from its peak, then same for the negative direction, that's counted as a step
 void checkStep(float x, char buffer[]) {
-  char* thing = "";
+  char thing[100] = "";
   sprintf(thing, "%d, ", step_min);
   appendInBuffer(buffer, thing);
   sprintf(thing, "%d, ", step_max);
@@ -544,93 +635,120 @@ void end_step() {
 }
 
 
+#else
+
+//moved to Battery section
+
+// const unsigned long simulatedStepIntervalMs = 1000;
+
+// void setupICM20948() {
+//   SERIAL_PORT.println("ICM-20948 disabled; using simulated step counter");
+// }
+
+// void loopICM20948(void *pvParameters) {
+//   while (1) {
+//     float batteryFraction = readBattery();
+
+//     steps_taken++;
+//     temperature = 72 + (steps_taken % 5);
+
+//     digitalWrite(LED_pin, HIGH);
+//     vTaskDelay(pdMS_TO_TICKS(100));
+//     digitalWrite(LED_pin, LOW);
+
+//     SERIAL_PORT.print("Simulated steps: ");
+//     SERIAL_PORT.print(steps_taken);
+//     SERIAL_PORT.print(" | battery: ");
+//     SERIAL_PORT.println(batteryFraction, 3);
+
+//     vTaskDelay(pdMS_TO_TICKS(simulatedStepIntervalMs));
+//   }
+// }
+
+#endif
+
+
 // ============================================ LCD ===========================
 
-/*
-  LiquidCrystal Library - Hello World
-
- Demonstrates the use a 16x2 LCD display.  The LiquidCrystal
- library works with all LCD displays that are compatible with the
- Hitachi HD44780 driver. There are many of them out there, and you
- can usually tell them by the 16-pin interface.
-
- This sketch prints "Hello World!" to the LCD
- and shows the time.
-
-  The circuit:
- * LCD RS pin to digital pin 12
- * LCD Enable pin to digital pin 11
- * LCD D4 pin to digital pin 5
- * LCD D5 pin to digital pin 4
- * LCD D6 pin to digital pin 3
- * LCD D7 pin to digital pin 2
- * LCD R/W pin to ground
- * LCD VSS pin to ground
- * LCD VCC pin to 5V
- * 10K resistor:
- * ends to +5V and ground
- * wiper to LCD VO pin (pin 3)
-
- Library originally added 18 Apr 2008
- by David A. Mellis
- library modified 5 Jul 2009
- by Limor Fried (http://www.ladyada.net)
- example added 9 Jul 2009
- by Tom Igoe
- modified 22 Nov 2010
- by Tom Igoe
- modified 7 Nov 2016
- by Arturo Guadalupi
-
- This example code is in the public domain.
-
- http://www.arduino.cc/en/Tutorial/LiquidCrystalHelloWorld
-
-
-
-// include the library code:
-
-
-// #define LED2_pin 12
-// initialize the library by associating any needed LCD interface pin
-// with the arduino pin number it is connected to
+// SPLC780D character LCDs are command-compatible with HD44780 displays,
+// so the standard LiquidCrystal 4-bit interface works with the same pinout.
 const int rs = 19, en = 18, d4 = 27, d5 = 26, d6 = 25, d7 = 33;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 
+char lcdBuff[17];
+
 unsigned long last_lcd_print = 0;
 void setupLCD() {
-  // set up the LCD's number of columns and rows:
-  // pinMode(LED2_pin, OUTPUT);
-  // digitalWrite(LED2_pin, LOW);
+  delay(50);
   lcd.begin(16, 2);
-  // Print a message to the LCD.
-  lcd.print("hello, world!");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("SPLC780D LCD");
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
   delay(1000);
   lcd.clear();
-  delay(1000);
   last_lcd_print = millis();
 }
 
-char buff[16];
-
 #define millis_per_print 500
-void loopLCD() {
-  if (millis() > last_lcd_print + millis_per_print) {
-    // Serial.println("aaaaa");
-    last_lcd_print = millis();
-    // set the cursor to column 0, line 1
-    // (note: line 1 is the second row, since counting begins with 0):
-    lcd.clear();
-    // delay(500);
-    lcd.setCursor(0, 1);
-    // print the number of seconds since reset:
-    sprintf(buff, "%d steps", steps_taken);
-    lcd.print(buff);
-    // lcd.print("testtesttest");
+void loopLCD(void *pvParameters) {
+  while (1) {
+    if (flagSleep) {
+      lcdSleep();
+      vTaskDelay(1000); //will be asleep by then
+    }
+
+    if (millis() > last_lcd_print + millis_per_print) {
+      last_lcd_print = millis();
+      switch (displayMode) {
+        default: //0 or other
+          lcdSteps();
+          break;
+        case 1: 
+          lcdHeart();
+          break;
+        case 2:
+          lcdBattery();
+          break;
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
-*/
+void lcdSteps() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Steps:");
+  lcd.setCursor(0, 1);
+  snprintf(lcdBuff, sizeof(lcdBuff), "%d", steps_taken);
+  lcd.print(lcdBuff);
+}
+void lcdHeart() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("BPM:");
+  lcd.setCursor(0, 1);
+  snprintf(lcdBuff, sizeof(lcdBuff), "%d", beatAvg);
+  lcd.print(lcdBuff);
+}
+void lcdBattery() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Battery:");
+  lcd.setCursor(0, 1);
+  snprintf(lcdBuff, sizeof(lcdBuff), "%.0f", batteryFraction * 100);
+  lcd.print(lcdBuff);
+}
+void lcdSleep() {
+  lcd.noDisplay();
+
+  // lcd.clear();
+  // lcd.setCursor(0, 0);
+  // lcd.print("zzzzz");
+}
 
 // ============================================ Printer ===========================
 
@@ -652,6 +770,9 @@ void printFromQueue(void *pvParameters) {
     struct Message myMessage;
     while (xQueueReceive(msgQueue, &myMessage, portMAX_DELAY) == pdPASS) {
       // Serial.print("msg received! ->");
+      if (flagSleep) {
+        break;
+      }
       Serial.println(myMessage.buffer);
     }
 
@@ -668,16 +789,19 @@ void setupMsgQueue() {
 //
 
 
-#define BUTTON_INTERRUPT_PIN 32
+#define BUTTON_SLEEP_PIN 32
+#define BUTTON_DISPLAY_MODE_PIN 14
 
 void setupButton() {
-  pinMode(BUTTON_INTERRUPT_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(BUTTON_INTERRUPT_PIN), buttonInterrupt, FALLING);
+  pinMode(BUTTON_SLEEP_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_SLEEP_PIN), sleepInterrupt, FALLING);
+  pinMode(BUTTON_DISPLAY_MODE_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_DISPLAY_MODE_PIN), displayInterrupt, FALLING);
   
   ++bootCount;
   Serial.println("Boot count: " + String(bootCount));
   digitalWrite(BPM_LED_Pin, HIGH);
-  delay(100);
+  delay(500);
   digitalWrite(BPM_LED_Pin, LOW);
   delay(100);
   // testButton();
@@ -690,40 +814,46 @@ void setupButton() {
 //   }
 // }
 
-bool flagSleep = false;
-int cooldown = 0;
-void buttonInterrupt() {
+void sleepInterrupt() {
   flagSleep = true;
-  // if (cooldown > 0) return;
   // flagHighPrecision = !flagHighPrecision;
   // interruptCounter++;
-  // cooldown = 500;
+}
+
+int cooldown = 0;
+void displayInterrupt() {
+  // if (cooldown > 0) return; //basic debouncing
+  displayMode = (displayMode + 1) % (maxDisplayMode + 1);
+  cooldown = 400;
 }
 
 void loopButton(void *pvParameters) {
-  // float delayAmount = 100;
   // while(1) {
   //   digitalWrite(BPM_LED_Pin, flagHighPrecision);
   //   // Serial.printf("interrupt count: %d, flagHighPrecision:%s\n", interruptCounter, flagHighPrecision ? "true" : "false");
-  //   if (cooldown > 0) {
-  //     cooldown -= delayAmount;
-  //   }
-  //   vTaskDelay(delayAmount);
   // }
+
+  float delayAmount = 100;
 
   while (1) {
     if (flagSleep) {
       goToSleep();
     }
-    vTaskDelay(100);
+    if (cooldown > 0) {
+      cooldown -= delayAmount;
+    }
+
+    vTaskDelay(delayAmount);
   }
 }
 
 void goToSleep() {
-  esp_sleep_enable_ext0_wakeup(WAKEUP_GPIO, LOW); //same as BUTTON_INTERRUPT_PIN
+  esp_sleep_enable_ext0_wakeup(WAKEUP_GPIO, LOW); //same as BUTTON_SLEEP_PIN
   pinMode(WAKEUP_GPIO, PULLUP);
   Serial.println("sleeping now...");
+  digitalWrite(BPM_LED_Pin, HIGH);
   delay(500);
+  digitalWrite(BPM_LED_Pin, LOW);
   esp_deep_sleep_start();
 }
 
@@ -773,7 +903,7 @@ void setup() {
   Serial.println("e");
   delay(200);
 
-//  setupLCD();
+  setupLCD();
   Serial.println("f");
   delay(200);
 
@@ -802,15 +932,44 @@ void setup() {
   Serial.println("g");
   delay(200);
 
-  // xTaskCreate(
-  // loopICM20948
-  // ,  "loopICM20948"  // A name just for humans
-  // ,  4096  // stack size
-  // ,  NULL
-  // ,  2  // Priority
-  // ,  NULL ); 
-  // Serial.println("h");
-  // delay(5000);
+  
+  xTaskCreate(
+  loopLCD
+  ,  "loopLCD"  // A name just for humans
+  ,  4096  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
+  Serial.println("i");
+  delay(200);
+
+  xTaskCreate(
+  loopOTA
+  ,  "loopOTA"  // A name just for humans
+  ,  4096  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
+  Serial.println("i");
+  delay(200);
+
+  xTaskCreate(
+  loopButton
+  ,  "loopButton"  // A name just for humans
+  ,  2048  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
+  
+  xTaskCreate(
+  loopICM20948
+  ,  "loopICM20948"  // A name just for humans
+  ,  4096  // stack size
+  ,  NULL
+  ,  2  // Priority
+  ,  NULL ); 
+  Serial.println("h");
+  delay(200);
 
   xTaskCreate(
   loopHeartRate
@@ -822,39 +981,27 @@ void setup() {
   Serial.println("h");
   delay(200);
 
-  // xTaskCreate(
-  // loopICM20948
-  // ,  "loopICM20948"  // A name just for humans
-  // ,  1028  // stack size
-  // ,  NULL
-  // ,  2  // Priority
-  // ,  NULL ); 
-  // Serial.println("h");
-  // delay(200);
-  
-  // xTaskCreate(
-  // loopLCD
-  // ,  "loopLCD"  // A name just for humans
-  // ,  1028  // stack size
-  // ,  NULL
-  // ,  2  // Priority
-  // ,  NULL ); 
-  // Serial.println("i");
-  // delay(200);
-
   xTaskCreate(
-  loopButton
-  ,  "loopButton"  // A name just for humans
-  ,  2048  // stack size
+  loopBattery
+  ,  "loopBattery"  // A name just for humans
+  ,  4096  // stack size
   ,  NULL
   ,  2  // Priority
   ,  NULL ); 
-  Serial.println("h");
+  Serial.println("j");
   delay(200);
 
 
   Serial.println("setup complete");
   delay(200);
+
+  digitalWrite(BPM_LED_Pin, HIGH);
+  delay(200);
+  digitalWrite(BPM_LED_Pin, LOW);
+  delay(200);
+  digitalWrite(BPM_LED_Pin, HIGH);
+  delay(200);
+  digitalWrite(BPM_LED_Pin, LOW);
 }
 
 void loop() {
@@ -862,5 +1009,3 @@ void loop() {
   
   // long after = micros();
 }
-
-#endif
