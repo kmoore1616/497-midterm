@@ -27,11 +27,11 @@ static const char *ACTIVITY_SERVICE_UUID = "6cfb5360-8c88-4f50-9f24-6ed6bd8d3f8f
 static const char *STEP_COUNT_CHAR_UUID = "0b8dd7d2-e8ad-4a32-8f56-f191d0fc3c42";
 static const char *TEMP_CHAR_UUID = "0b9ee8e3-f9be-5b43-9067-02a2e10d4d53";
 
-//const char* ssid = "Pixel#";
-//const char* password = "crazy1234";
+const char* ssid = "Pixel#";
+const char* password = "crazy1234";
 
-const char* ssid = "TP-Link_BDF3";
-const char* password = "57394206";
+// const char* ssid = "TP-Link_BDF3";
+// const char* password = "57394206";
 
 BLECharacteristic *stepCharacteristic;
 BLECharacteristic *tempCharacteristic;
@@ -100,6 +100,9 @@ float batteryFraction = 1;
 int batteryPercentage = 100;
 
 int beatAvg;
+
+#define awakeMillis 30000
+int awakeTimer;
 
 // ================================= BATTERY ==================================================
 
@@ -333,6 +336,15 @@ void setupHeartRate()
   particleSensor.setup(); //Configure sensor with default settings
   particleSensor.setPulseAmplitudeRed(0x0A); //Turn Red LED to low to indicate sensor is running
   particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
+
+  //https://github.com/sparkfun/SparkFun_MAX3010x_Sensor_Library/blob/master/src/MAX30105.cpp, 
+  // particleSensor.setSampleRate((uint8_t) 0x08); //search for MAX30105_SAMPLERATE etc
+  // particleSensor.setPulseWidth((uint8_t) 0x03); //0x00 to 0x03
+  // particleSensor.setPulseAmplitudeRed((uint8_t) 0x7F);
+  //this one makes it basically non-responsive. Keep at max
+  // particleSensor.setPulseAmplitudeIR((uint8_t) 0xFF); //0x00 = 0mA, 0x7F = 25.4mA, 0xFF = 50mA (typical)
+  // particleSensor.setPulseAmplitudeGreen((uint8_t)0x00);
+  
 }
 
 void loopHeartRate(void *pvParameters) {
@@ -405,7 +417,9 @@ void loopHeartRate(void *pvParameters) {
 
     if (irValue < 50000)
       appendInBuffer(msg.buffer, " No finger?");
-    
+    else 
+      awakeTimer = millis() + awakeMillis;
+
     xQueueSend(msgQueue, &msg, portMAX_DELAY);
     // Serial.println("heart rate msg sent");
     
@@ -627,11 +641,13 @@ void begin_step() {
   digitalWrite(LED_pin, HIGH);
   going_up = false;
   steps_taken++;
+  awakeTimer = millis() + awakeMillis;
 }
 
 void end_step() {
   digitalWrite(LED_pin, LOW);
   going_up = true;
+  awakeTimer = millis() + awakeMillis;
 }
 
 
@@ -784,7 +800,7 @@ void setupMsgQueue() {
   msgQueue = xQueueCreate(10, sizeof(struct Message));
 }
 
-// ============================================ Button Interrupt ===========================
+// ============================================ Control (Button Interrupt) ===========================
 
 //
 
@@ -792,7 +808,7 @@ void setupMsgQueue() {
 #define BUTTON_SLEEP_PIN 32
 #define BUTTON_DISPLAY_MODE_PIN 14
 
-void setupButton() {
+void setupControl() {
   pinMode(BUTTON_SLEEP_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(BUTTON_SLEEP_PIN), sleepInterrupt, FALLING);
   pinMode(BUTTON_DISPLAY_MODE_PIN, INPUT_PULLUP);
@@ -805,6 +821,8 @@ void setupButton() {
   digitalWrite(BPM_LED_Pin, LOW);
   delay(100);
   // testButton();
+
+  awakeTimer = millis() + awakeMillis + 5000;
 }
 
 // void testButton() {
@@ -814,6 +832,7 @@ void setupButton() {
 //   }
 // }
 
+bool flagResetTimer = false;
 void sleepInterrupt() {
   flagSleep = true;
   // flagHighPrecision = !flagHighPrecision;
@@ -825,9 +844,10 @@ void displayInterrupt() {
   // if (cooldown > 0) return; //basic debouncing
   displayMode = (displayMode + 1) % (maxDisplayMode + 1);
   cooldown = 400;
+  flagResetTimer = true;
 }
 
-void loopButton(void *pvParameters) {
+void loopControl(void *pvParameters) {
   // while(1) {
   //   digitalWrite(BPM_LED_Pin, flagHighPrecision);
   //   // Serial.printf("interrupt count: %d, flagHighPrecision:%s\n", interruptCounter, flagHighPrecision ? "true" : "false");
@@ -841,6 +861,13 @@ void loopButton(void *pvParameters) {
     }
     if (cooldown > 0) {
       cooldown -= delayAmount;
+    }
+    if (millis() > awakeTimer) {
+      flagSleep = true;
+    } 
+    if (flagResetTimer) {
+      awakeTimer = millis() + awakeMillis;
+      flagResetTimer = false;
     }
 
     vTaskDelay(delayAmount);
@@ -879,7 +906,7 @@ void setup() {
   SERIAL_PORT.begin(115200);
   while(!SERIAL_PORT);
 
-  // setupWiFi();
+  setupWiFi();
   Serial.println("a");
   delay(200);
 
@@ -907,7 +934,7 @@ void setup() {
   Serial.println("f");
   delay(200);
 
-  setupButton();
+  setupControl();
   Serial.println("a");
   delay(200);
 
@@ -954,8 +981,8 @@ void setup() {
   delay(200);
 
   xTaskCreate(
-  loopButton
-  ,  "loopButton"  // A name just for humans
+  loopControl
+  ,  "loopControl"  // A name just for humans
   ,  2048  // stack size
   ,  NULL
   ,  2  // Priority
